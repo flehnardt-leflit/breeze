@@ -2,8 +2,33 @@ import { describe, it, expect } from 'vitest';
 import {
   createTimeEntrySchema, updateTimeEntrySchema, startTimerSchema,
   listTimeEntriesQuerySchema, bulkApproveSchema, ticketPartSchema,
-  updateTicketPartSchema, billablesExportQuerySchema, billingStatusSchema
+  updateTicketPartSchema, billablesExportQuerySchema, billingStatusSchema, timesheetQuerySchema
 } from './timeEntries';
+
+describe('timesheet time zone query', () => {
+  it('preserves legacy instant coercion without a timezone', () => {
+    expect(timesheetQuerySchema.parse({ weekStart: '2026-06-08T12:34:00Z' }).weekStart)
+      .toEqual(new Date('2026-06-08T12:34:00Z'));
+  });
+  it.each(['Europe/Berlin', 'US/Eastern', 'UTC', 'Pacific/Apia'])('accepts IANA zone %s', timezone => {
+    expect(timesheetQuerySchema.parse({ weekStart: '2026-06-08', timezone }))
+      .toMatchObject({ weekStart: new Date('2026-06-08T00:00:00Z'), timezone });
+  });
+  it.each(['0100-01-01', '9999-12-22'])('accepts the safe calendar boundary %s', weekStart => {
+    expect(timesheetQuerySchema.safeParse({ weekStart, timezone: 'UTC' }).success).toBe(true);
+  });
+  it.each(['9999-12-23', '9999-12-31'])('rejects calendar dates beyond the safe week range %s', weekStart => {
+    expect(timesheetQuerySchema.safeParse({ weekStart, timezone: 'UTC' }).success).toBe(false);
+    // Legacy callers retain the previous date coercion.
+    expect(timesheetQuerySchema.safeParse({ weekStart }).success).toBe(true);
+  });
+  it.each(['', 'Not/AZone', '+01:00', 'x'.repeat(65)])('rejects timezone %s', timezone => {
+    expect(timesheetQuerySchema.safeParse({ weekStart: '2026-06-08', timezone }).success).toBe(false);
+  });
+  it.each(['2026-02-30', '2026-06-08T00:00:00Z', 'junk', '0000-01-01'])('rejects invalid local date %s', weekStart => {
+    expect(timesheetQuerySchema.safeParse({ weekStart, timezone: 'Europe/Berlin' }).success).toBe(false);
+  });
+});
 
 describe('awaiting_approval (#4617 W02): readable, never client-writable', () => {
   const base = { startedAt: '2026-06-11T09:00:00Z', endedAt: '2026-06-11T09:30:00Z' };

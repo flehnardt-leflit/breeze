@@ -4,6 +4,7 @@ import { timeEntries, ticketParts, tickets, ticketCategories, organizations, par
 import { isHiddenOrgType } from './unassignedPool/visibility';
 import { workTypes } from '../db/schema/workTypes';
 import { emitTimeEntryEvent } from './timeEntryEvents';
+import { timesheetWeek } from './timesheetCalendar';
 import { loadCardsForOrg } from './billingProfileService';
 import { resolveBillingRule, type BillingRule } from './billingRuleResolver';
 import { getActiveWorkType } from './workTypeService';
@@ -2064,8 +2065,10 @@ export interface CurrencyAmount {
   amount: string;
 }
 
-export async function getTimesheet(userId: string, weekStart: Date, accessibleOrgIds: string[] | null = null) {
-  const weekEnd = new Date(weekStart.getTime() + 7 * 24 * 60 * 60_000);
+export async function getTimesheet(userId: string, weekStart: Date, accessibleOrgIds: string[] | null = null, timezone?: string) {
+  const calendar = timezone ? timesheetWeek(weekStart, timezone) : null;
+  const queryStart = calendar?.start ?? weekStart;
+  const weekEnd = calendar?.end ?? new Date(weekStart.getTime() + 7 * 24 * 60 * 60_000);
   // Org-axis allowlist: time_entries is partner-axis RLS only, so an
   // orgAccess='selected' partner user would otherwise see timesheet entries
   // across all orgs under the partner. Apply the same orgAxisSql predicate used
@@ -2074,11 +2077,11 @@ export async function getTimesheet(userId: string, weekStart: Date, accessibleOr
   const orgAxis = orgAxisSql(accessibleOrgIds);
   const baseCondition = and(
     eq(timeEntries.userId, userId),
-    gte(timeEntries.startedAt, weekStart),
+    gte(timeEntries.startedAt, queryStart),
     lt(timeEntries.startedAt, weekEnd),
     ...(orgAxis ? [orgAxis] : [])
   );
-  const entries = await db
+  const queriedEntries = await db
     .select(entrySelection())
     .from(timeEntries)
     .leftJoin(tickets, eq(timeEntries.ticketId, tickets.id))
@@ -2086,14 +2089,21 @@ export async function getTimesheet(userId: string, weekStart: Date, accessibleOr
     .where(baseCondition)
     .orderBy(asc(timeEntries.startedAt));
 
+  // A midnight rollback can briefly enter a new calendar date and then return
+  // to the previous one. The query bounds enclose both occurrences; remove
+  // intervening out-of-week rows before any day or monetary aggregation.
+  const entries = calendar
+    ? queriedEntries.filter(entry => calendar.days.includes(calendar.dateOf(entry.startedAt)))
+    : queriedEntries;
+
   const days = new Map<string, TimesheetDay>();
   for (let i = 0; i < 7; i++) {
     const d = new Date(weekStart.getTime() + i * 24 * 60 * 60_000);
-    const key = d.toISOString().slice(0, 10);
+    const key = calendar?.days[i] ?? d.toISOString().slice(0, 10);
     days.set(key, { date: key, totalMinutes: 0, billableMinutes: 0, entries: [] });
   }
   for (const entry of entries) {
-    const key = entry.startedAt.toISOString().slice(0, 10);
+    const key = calendar?.dateOf(entry.startedAt) ?? entry.startedAt.toISOString().slice(0, 10);
     const day = days.get(key);
     if (!day) continue; // boundary rows from TZ edges — still in totals below
     day.entries.push(entry);

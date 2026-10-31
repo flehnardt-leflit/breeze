@@ -16,6 +16,7 @@ vi.mock('../shared/Toast', () => ({ showToast: (...a: unknown[]) => showToast(..
 import TicketTimeBilling from './TicketTimeBilling';
 import { resetWorkTypeCache } from '../shared/WorkTypeSelect';
 import { BILLING_CHANGED_EVENT, TIMER_CHANGED_EVENT } from '../../lib/timerActions';
+import { formatDateTime } from '../../lib/dateTimeFormat';
 
 const summary = {
   time: { totalMinutes: 90, billableMinutes: 60, billableAmounts: [{ currencyCode: 'EUR', amount: '150.00' }] },
@@ -32,6 +33,107 @@ const route = (url: string) => {
 beforeEach(() => { resetWorkTypeCache(); fetchWithAuth.mockReset(); fetchWithAuth.mockImplementation(async (url: string) => route(url)); });
 
 describe('TicketTimeBilling', () => {
+  it('finds a newly logged historical entry beyond the five most recent entries', async () => {
+    const newer = Array.from({ length: 6 }, (_, i) => ({ ...entries[0], id: `new-${i}`, description: `newer ${i}` }));
+    let rows = [...newer];
+    fetchWithAuth.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/time-entries' && init?.method === 'POST') {
+        rows = [...newer, { ...entries[0], id: 'old', description: 'old historical work' }];
+        return { ok: true, status: 201, json: async () => ({ data: {} }) } as Response;
+      }
+      if (url.startsWith('/tickets/tk-1/time-entries')) {
+        const query = new URL(url, 'http://localhost').searchParams;
+        const offset = Number(query.get('offset') ?? 0);
+        return { ok: true, status: 200, json: async () => ({ data: rows.slice(offset, offset + 5), total: rows.length }) } as Response;
+      }
+      return route(url);
+    });
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    expect(await screen.findByText('newer 0', { exact: false })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-toggle'));
+    fireEvent.click(screen.getByTestId('ticket-billing-detailed-mode'));
+    fireEvent.change(screen.getByTestId('ticket-billing-work-date'), { target: { value: '2025-06-12' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-start-time'), { target: { value: '09:00' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-end-time'), { target: { value: '10:00' } });
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+    await waitFor(() => expect(fetchWithAuth.mock.calls.some(([url, init]) => url === '/time-entries' && (init as RequestInit)?.method === 'POST')).toBe(true));
+    await waitFor(() => expect(screen.getByTestId('ticket-billing-next-page')).toBeEnabled());
+    fireEvent.click(screen.getByTestId('ticket-billing-next-page'));
+    expect(await screen.findByText('old historical work', { exact: false })).toBeInTheDocument();
+    expect(screen.getByTestId('ticket-billing-prev-page')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('ticket-billing-prev-page'));
+    expect(await screen.findByText('newer 0', { exact: false })).toBeInTheDocument();
+  });
+
+  it('offers a retry when a page request fails and retains navigation', async () => {
+    let fail = true;
+    fetchWithAuth.mockImplementation(async (url: string) => {
+      if (url.includes('offset=5') && fail) return { ok: false, status: 500 } as Response;
+      if (url.startsWith('/tickets/tk-1/time-entries')) {
+        return { ok: true, status: 200, json: async () => ({ data: entries, total: 6 }) } as Response;
+      }
+      return route(url);
+    });
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-next-page'));
+    expect(await screen.findByTestId('ticket-billing-page-error')).toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByTestId('ticket-billing-page-retry'));
+    expect(await screen.findByTestId('ticket-billing-entry-range-te-1')).toBeInTheDocument();
+  });
+
+  it('returns to the last valid page when the final entry on a page is deleted', async () => {
+    let rows = Array.from({ length: 6 }, (_, i) => ({ ...entries[0], id: `item-${i}`, description: `entry ${i}` }));
+    fetchWithAuth.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/time-entries/item-5' && init?.method === 'DELETE') {
+        rows = rows.slice(0, 5);
+        return { ok: true, status: 200, json: async () => ({}) } as Response;
+      }
+      if (url.startsWith('/tickets/tk-1/time-entries')) {
+        const offset = Number(new URL(url, 'http://localhost').searchParams.get('offset') ?? 0);
+        return { ok: true, status: 200, json: async () => ({ data: rows.slice(offset, offset + 5), total: rows.length }) } as Response;
+      }
+      return route(url);
+    });
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-next-page'));
+    fireEvent.click(await screen.findByTestId('ticket-billing-delete-item-5'));
+    fireEvent.click(await screen.findByTestId('ticket-billing-delete-confirm'));
+    expect(await screen.findByText('entry 0', { exact: false })).toBeInTheDocument();
+    expect(screen.queryByTestId('ticket-billing-next-page')).toBeNull();
+  });
+
+  it('resets pagination on ticket switch and ignores a late response for the previous ticket', async () => {
+    let releaseOld: ((r: Response) => void) | undefined;
+    fetchWithAuth.mockImplementation(async (url: string) => {
+      if (url.startsWith('/tickets/tk-1/time-entries') && url.includes('offset=5')) {
+        return new Promise<Response>((resolve) => { releaseOld = resolve; });
+      }
+      if (url.startsWith('/tickets/tk-1/time-entries')) {
+        return { ok: true, status: 200, json: async () => ({ data: entries, total: 6 }) } as Response;
+      }
+      if (url.startsWith('/tickets/tk-2/time-entries')) {
+        return { ok: true, status: 200, json: async () => ({ data: [{ ...entries[0], id: 'other', description: 'other ticket' }], total: 1 }) } as Response;
+      }
+      if (url.startsWith('/tickets/tk-2/billing-summary')) {
+        return { ok: true, status: 200, json: async () => ({ data: summary }) } as Response;
+      }
+      return route(url);
+    });
+    const { rerender } = render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-next-page'));
+    await waitFor(() => expect(releaseOld).toBeDefined());
+    rerender(<TicketTimeBilling ticketId="tk-2" />);
+    expect(await screen.findByText('other ticket', { exact: false })).toBeInTheDocument();
+    expect(fetchWithAuth.mock.calls.some(([url]) => String(url).startsWith('/tickets/tk-2/time-entries?limit=5&offset=0'))).toBe(true);
+    await act(async () => {
+      releaseOld?.({ ok: true, status: 200, json: async () => ({ data: [{ ...entries[0], description: 'stale old ticket' }], total: 6 }) } as Response);
+      await Promise.resolve();
+    });
+    expect(screen.queryByText('stale old ticket', { exact: false })).toBeNull();
+    expect(screen.getByText('other ticket', { exact: false })).toBeInTheDocument();
+  });
+
   it('renders totals from the billing summary', async () => {
     render(<TicketTimeBilling ticketId="tk-1" />);
     expect((await screen.findByTestId('ticket-billing-time-total')).textContent).toContain('1h 30m');
@@ -45,6 +147,13 @@ describe('TicketTimeBilling', () => {
     expect(parts.textContent).not.toContain('61.98');
     expect(screen.getByTestId('ticket-billing-parts-total-EUR').textContent).toBe('€49.98');
     expect(screen.getByTestId('ticket-billing-parts-total-USD').textContent).toBe('$12.00');
+  });
+
+  it('shows the local start and end of an entry in the ticket', async () => {
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    const range = await screen.findByTestId('ticket-billing-entry-range-te-1');
+    expect(range).toHaveTextContent(formatDateTime(entries[0]!.startedAt, { dateStyle: 'short', timeStyle: 'short' }));
+    expect(range).toHaveTextContent(formatDateTime(entries[0]!.endedAt, { dateStyle: 'short', timeStyle: 'short' }));
   });
 
   // W06 (#3900): the SAME badge the timesheet renders, from the same helper, so
@@ -173,6 +282,86 @@ describe('TicketTimeBilling', () => {
       expect(body.description).toBe('patched');
       expect(new Date(body.endedAt).getTime() - new Date(body.startedAt).getTime()).toBe(30 * 60_000);
     });
+  });
+
+  it('posts a historical interval with the existing billing defaults and refreshes listeners', async () => {
+    const billing = vi.fn();
+    window.addEventListener(BILLING_CHANGED_EVENT, billing);
+    try {
+      render(<TicketTimeBilling ticketId="tk-1" />);
+      fireEvent.click(await screen.findByTestId('ticket-billing-quick-add-toggle'));
+      fireEvent.click(screen.getByTestId('ticket-billing-detailed-mode'));
+      fireEvent.change(screen.getByTestId('ticket-billing-work-date'), { target: { value: '2025-06-12' } });
+      fireEvent.change(screen.getByTestId('ticket-billing-start-time'), { target: { value: '09:00' } });
+      fireEvent.change(screen.getByTestId('ticket-billing-end-time'), { target: { value: '10:00' } });
+      fireEvent.change(screen.getByTestId('ticket-billing-quick-add-description'), { target: { value: 'historical work' } });
+      expect(screen.getByTestId('ticket-billing-duration')).toHaveTextContent('1h');
+      fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+      await waitFor(() => expect(fetchWithAuth.mock.calls.some(([url]) => url === '/time-entries')).toBe(true));
+      const call = fetchWithAuth.mock.calls.find(([url]) => url === '/time-entries')!;
+      const body = JSON.parse((call[1] as RequestInit).body as string);
+      expect(body).toMatchObject({ ticketId: 'tk-1', description: 'historical work' });
+      expect(body).not.toHaveProperty('workTypeId');
+      expect(body).not.toHaveProperty('isBillable');
+      expect(body).not.toHaveProperty('hourlyRate');
+      expect(new Date(body.startedAt)).toEqual(new Date(2025, 5, 12, 9));
+      expect(new Date(body.endedAt)).toEqual(new Date(2025, 5, 12, 10));
+      await waitFor(() => expect(billing).toHaveBeenCalled());
+    } finally {
+      window.removeEventListener(BILLING_CHANGED_EVENT, billing);
+    }
+  });
+
+  it('rejects a reversed interval unless next-day end is selected', async () => {
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-quick-add-toggle'));
+    fireEvent.click(screen.getByTestId('ticket-billing-detailed-mode'));
+    fireEvent.change(screen.getByTestId('ticket-billing-work-date'), { target: { value: '2025-06-12' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-start-time'), { target: { value: '23:00' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-end-time'), { target: { value: '01:00' } });
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+    expect(screen.getByTestId('ticket-billing-detailed-error')).toHaveTextContent(/after/i);
+    expect(fetchWithAuth.mock.calls.some(([url]) => url === '/time-entries')).toBe(false);
+    fireEvent.click(screen.getByTestId('ticket-billing-next-day'));
+    expect(screen.getByTestId('ticket-billing-duration')).toHaveTextContent('2h');
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+    await waitFor(() => expect(fetchWithAuth.mock.calls.some(([url]) => url === '/time-entries')).toBe(true));
+  });
+
+  it('keeps the detailed inputs when the server refuses the entry', async () => {
+    showToast.mockClear();
+    fetchWithAuth.mockImplementation(async (url: string) => url === '/time-entries'
+      ? { ok: false, status: 403, json: async () => ({ error: 'Forbidden' }) } as Response
+      : route(url));
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-quick-add-toggle'));
+    fireEvent.click(screen.getByTestId('ticket-billing-detailed-mode'));
+    fireEvent.change(screen.getByTestId('ticket-billing-work-date'), { target: { value: '2025-06-12' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-start-time'), { target: { value: '09:00' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-end-time'), { target: { value: '10:00' } });
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+    await waitFor(() => expect(showToast).toHaveBeenCalled());
+    expect(screen.getByTestId('ticket-billing-work-date')).toHaveValue('2025-06-12');
+    expect(screen.getByTestId('ticket-billing-start-time')).toHaveValue('09:00');
+    expect(screen.getByTestId('ticket-billing-end-time')).toHaveValue('10:00');
+  });
+
+  it('uses the existing permission-gated billing override path in detailed mode', async () => {
+    canManageBilling = false;
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-quick-add-toggle'));
+    fireEvent.click(screen.getByTestId('ticket-billing-detailed-mode'));
+    fireEvent.change(screen.getByTestId('ticket-billing-work-date'), { target: { value: '2025-06-12' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-start-time'), { target: { value: '09:00' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-end-time'), { target: { value: '10:00' } });
+    expect(screen.getByTestId('ticket-billing-quick-add-billable')).toBeDisabled();
+    expect(screen.getByTestId('ticket-billing-quick-add-rate')).toHaveAttribute('readonly');
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+    await waitFor(() => expect(fetchWithAuth.mock.calls.some(([url]) => url === '/time-entries')).toBe(true));
+    const call = fetchWithAuth.mock.calls.find(([url]) => url === '/time-entries')!;
+    const body = JSON.parse((call[1] as RequestInit).body as string);
+    expect(body).not.toHaveProperty('isBillable');
+    expect(body).not.toHaveProperty('hourlyRate');
   });
 
   // #5321: the quick-add offered no rate, so an entry landed with hourly_rate

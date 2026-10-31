@@ -373,9 +373,34 @@ describe('POST /time-entries workTypeId admission', () => {
 });
 
 describe('GET /timesheet', () => {
+  it('passes a validated timezone and rejects invalid values without calling the service', async () => {
+    serviceMocks.getTimesheet.mockResolvedValue({ weekStart: '2026-10-26', days: [], totals: { totalMinutes: 0, billableMinutes: 0 } });
+    const res = await timeEntriesRoutes.request('/timesheet?weekStart=2026-10-26&timezone=Europe%2FBerlin');
+    expect(res.status).toBe(200);
+    expect(serviceMocks.getTimesheet).toHaveBeenCalledWith('1f2f1d8e-0001-4000-8000-000000000001', new Date('2026-10-26T00:00:00Z'), null, 'Europe/Berlin');
+    serviceMocks.getTimesheet.mockClear();
+    const invalid = await timeEntriesRoutes.request('/timesheet?weekStart=2026-10-26&timezone=Not%2FAZone');
+    expect(invalid.status).toBe(400);
+    expect(serviceMocks.getTimesheet).not.toHaveBeenCalled();
+  });
+
+  it('rejects an out-of-range zoned calendar week as a validation error', async () => {
+    serviceMocks.getTimesheet.mockClear();
+    const res = await timeEntriesRoutes.request('/timesheet?weekStart=9999-12-31&timezone=UTC');
+    expect(res.status).toBe(400);
+    expect(serviceMocks.getTimesheet).not.toHaveBeenCalled();
+  });
+
   it("403s a non-admin requesting someone else's timesheet", async () => {
     const res = await timeEntriesRoutes.request('/timesheet?userId=1f2f1d8e-0001-4000-8000-000000000002&weekStart=2026-06-08');
     expect(res.status).toBe(403);
+  });
+
+  it('does not bypass access control with a time zone', async () => {
+    serviceMocks.getTimesheet.mockClear();
+    const res = await timeEntriesRoutes.request('/timesheet?userId=1f2f1d8e-0001-4000-8000-000000000002&weekStart=2026-06-08&timezone=Europe%2FBerlin');
+    expect(res.status).toBe(403);
+    expect(serviceMocks.getTimesheet).not.toHaveBeenCalled();
   });
 
   it('defaults to own timesheet and passes null accessibleOrgIds', async () => {

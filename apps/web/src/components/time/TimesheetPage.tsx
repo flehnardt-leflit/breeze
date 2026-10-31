@@ -116,6 +116,14 @@ function mondayUtc(d: Date): string {
   return utc.toISOString().slice(0, 10);
 }
 
+/** Calendar Monday in the browser's local zone. UTC here is only used for
+ * calendar arithmetic after extracting the local date, not as a time zone. */
+export function localWeekStart(d: Date): string {
+  const calendar = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  calendar.setUTCDate(calendar.getUTCDate() - (calendar.getUTCDay() + 6) % 7);
+  return calendar.toISOString().slice(0, 10);
+}
+
 /** The date the approximate line asks rates for. A timesheet is HISTORICAL, so
  *  an old week must be converted at that week's rates, not today's — but never
  *  at a future date, because the feed has no rows past today. Hence the earlier
@@ -149,7 +157,7 @@ function parseHash(hash: string): { week: string; tech: string | null } {
       tech = part.slice('tech='.length) || null;
     }
   }
-  return { week: week ?? mondayUtc(new Date()), tech };
+  return { week: week ?? localWeekStart(new Date()), tech };
 }
 
 function writeHash(week: string, tech: string | null): void {
@@ -252,7 +260,10 @@ export default function TimesheetPage() {
     setLoadError(false);
     setDenied(false);
     try {
-      const params = new URLSearchParams({ weekStart: loadWeek });
+      const params = new URLSearchParams({
+        weekStart: loadWeek,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      });
       if (loadTech) params.set('userId', loadTech);
       const res = await fetchWithAuth(`/time-entries/timesheet?${params.toString()}`);
       if (seq !== fetchSeq.current) return;
@@ -306,8 +317,7 @@ export default function TimesheetPage() {
   }, [week, tech]);
 
   const goToThisWeek = useCallback(() => {
-    // mondayUtc(new Date()) buckets by UTC — late-Sunday users west of UTC may land on "next" week; matches the API's UTC day-bucketing.
-    const newWeek = mondayUtc(new Date());
+    const newWeek = localWeekStart(new Date());
     setWeek(newWeek);
     writeHash(newWeek, tech);
   }, [tech]);

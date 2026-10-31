@@ -1115,6 +1115,49 @@ describe('routine billed-state admission', () => {
 });
 
 describe('query helpers', () => {
+  it('buckets timezone-aware timesheets by the local calendar date while preserving billing totals', async () => {
+    dbMocks.selectResults.push([
+      { id: 'monday', startedAt: new Date('2026-10-25T23:30:00Z'), durationMinutes: 30, billableMinutes: 60, isBillable: true, hourlyRate: '100.00', currencyCode: 'EUR' },
+      { id: 'friday', startedAt: new Date('2026-10-29T23:30:00Z'), durationMinutes: 30, isBillable: false },
+    ]);
+    const result = await getTimesheet('u-1', new Date('2026-10-26T00:00:00Z'), null, 'Europe/Berlin');
+    expect(inspect(dbMocks.whereArgs[0], { depth: 20 })).toContain('2026-10-25T23:00:00.000Z');
+    expect(inspect(dbMocks.whereArgs[0], { depth: 20 })).toContain('2026-11-01T23:00:00.000Z');
+    expect(result.weekStart).toBe('2026-10-26');
+    expect(result.days[0]!.entries.map((e: any) => e.id)).toEqual(['monday']);
+    expect(result.days[4]!.entries.map((e: any) => e.id)).toEqual(['friday']);
+    expect(result.totals).toEqual({ totalMinutes: 60, billableMinutes: 60, billableAmounts: [{ currencyCode: 'EUR', amount: '100.00' }] });
+  });
+
+  it('uses the exact original UTC start instant and 168-hour end for legacy callers', async () => {
+    dbMocks.selectResults.push([]);
+    await getTimesheet('u-1', new Date('2026-03-23T12:30:00Z'));
+    const where = inspect(dbMocks.whereArgs[0], { depth: 20 });
+    expect(where).toContain('2026-03-23T12:30:00.000Z');
+    expect(where).toContain('2026-03-30T12:30:00.000Z');
+  });
+
+  it('filters the repeated-midnight envelope before billing totals', async () => {
+    dbMocks.selectResults.push([
+      { id: 'outside', startedAt: new Date('2009-11-01T02:30:30Z'), durationMinutes: 60, isBillable: true, hourlyRate: '100.00', currencyCode: 'EUR' },
+      { id: 'inside', startedAt: new Date('2009-11-01T03:00:00Z'), durationMinutes: 30, isBillable: true, hourlyRate: '100.00', currencyCode: 'EUR' },
+    ]);
+    const result = await getTimesheet('u-1', new Date('2009-10-25T00:00:00Z'), null, 'America/St_Johns');
+    expect(result.days[6]!.entries.map((entry: any) => entry.id)).toEqual(['inside']);
+    expect(result.totals).toEqual({ totalMinutes: 30, billableMinutes: 30, billableAmounts: [{ currencyCode: 'EUR', amount: '50.00' }] });
+  });
+
+  it('keeps both occurrences of a repeated midnight while excluding the previous day', async () => {
+    dbMocks.selectResults.push([
+      { id: 'first', startedAt: new Date('2009-11-01T02:30:30Z'), durationMinutes: 10, isBillable: false },
+      { id: 'previous', startedAt: new Date('2009-11-01T03:00:00Z'), durationMinutes: 20, isBillable: false },
+      { id: 'second', startedAt: new Date('2009-11-01T03:30:30Z'), durationMinutes: 30, isBillable: false },
+    ]);
+    const result = await getTimesheet('u-1', new Date('2009-11-01T00:00:00Z'), null, 'America/St_Johns');
+    expect(result.days[0]!.entries.map((entry: any) => entry.id)).toEqual(['first', 'second']);
+    expect(result.totals.totalMinutes).toBe(40);
+  });
+
   it('getTimesheet buckets seven days and totals billable minutes', async () => {
     dbMocks.selectResults.push([
       {

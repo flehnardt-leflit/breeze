@@ -13,7 +13,7 @@ vi.mock('../../stores/auth', () => ({ fetchWithAuth: (...a: unknown[]) => fetchW
 const showToast = vi.fn();
 vi.mock('../shared/Toast', () => ({ showToast: (...a: unknown[]) => showToast(...a) }));
 
-import TimesheetPage from './TimesheetPage';
+import TimesheetPage, { localWeekStart } from './TimesheetPage';
 import { resetWorkTypeCache } from '../shared/WorkTypeSelect';
 
 const entry = { id: 'te-1', startedAt: '2026-06-08T09:00:00Z', endedAt: '2026-06-08T10:30:00Z', durationMinutes: 90, description: 'patching', isBillable: true, hourlyRate: '100.00', currencyCode: 'EUR', isApproved: false, ticketId: 'tk-1', ticketNumber: 'T-2026-0042', ticketSubject: 'x', userName: 'Todd', billingStatus: 'not_billed' };
@@ -40,6 +40,62 @@ beforeEach(() => {
 });
 
 describe('TimesheetPage', () => {
+  it('requests the displayed week using the browser IANA time zone', async () => {
+    render(<TimesheetPage />);
+    await waitFor(() => {
+      const call = fetchWithAuth.mock.calls.find(([url]) => String(url).startsWith('/time-entries/timesheet?weekStart=2026-06-08'));
+      expect(call).toBeDefined();
+      expect(new URL(String(call![0]), 'http://localhost').searchParams.get('timezone'))
+        .toBe(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+    });
+  });
+
+  it('calculates the local Monday around midnight and DST transitions', () => {
+    const originalTimezone = process.env.TZ;
+    try {
+      process.env.TZ = 'Europe/Berlin';
+      expect(localWeekStart(new Date('2026-10-25T23:30:00Z'))).toBe('2026-10-26');
+      expect(localWeekStart(new Date('2026-03-29T00:30:00Z'))).toBe('2026-03-23');
+      expect(localWeekStart(new Date('2026-03-30T00:30:00Z'))).toBe('2026-03-30');
+      expect(localWeekStart(new Date('2026-10-26T00:30:00Z'))).toBe('2026-10-26');
+      process.env.TZ = 'America/Los_Angeles';
+      expect(localWeekStart(new Date('2026-10-26T00:30:00Z'))).toBe('2026-10-19');
+    } finally {
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
+  });
+
+  it('opens and returns to the local current week at a UTC Sunday boundary', async () => {
+    const originalTimezone = process.env.TZ;
+    process.env.TZ = 'Europe/Berlin';
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-25T23:30:00Z'));
+    window.location.hash = '';
+    fetchWithAuth.mockImplementation(async (url: string) => {
+      if (url.startsWith('/time-entries/timesheet')) {
+        const start = new URL(url, 'http://localhost').searchParams.get('weekStart');
+        return jsonRes({ ...week, weekStart: start });
+      }
+      if (url.startsWith('/users')) return jsonRes([]);
+      return jsonRes({});
+    });
+    try {
+      render(<TimesheetPage />);
+      await waitFor(() => expect(fetchWithAuth).toHaveBeenCalledWith(
+        expect.stringContaining('weekStart=2026-10-26&timezone=Europe%2FBerlin'),
+      ));
+      fireEvent.click(screen.getByTestId('timesheet-prev-week'));
+      expect(window.location.hash).toContain('week=2026-10-19');
+      fireEvent.click(screen.getByTestId('timesheet-this-week'));
+      expect(window.location.hash).toContain('week=2026-10-26');
+    } finally {
+      vi.useRealTimers();
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
+  });
+
   it('fetches the week from the hash and renders day totals + entries', async () => {
     render(<TimesheetPage />);
     await waitFor(() => expect(fetchWithAuth).toHaveBeenCalledWith(expect.stringContaining('/time-entries/timesheet?weekStart=2026-06-08')));

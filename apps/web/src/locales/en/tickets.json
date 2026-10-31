@@ -254,6 +254,23 @@
       "notFound": "This entry no longer exists."
     },
     "deleteEntryWithDescription": "Delete {{duration}} time entry by {{tech}}: {{description}}",
+    "entryMode": "Entry mode",
+    "quickMode": "Quick minutes",
+    "detailedMode": "Detailed entry",
+    "workDate": "Work date",
+    "startTime": "Start time",
+    "endTime": "End time",
+    "nextDay": "End is on the next day",
+    "localTimeZone": "Local time zone: {{zone}}",
+    "duration": "Duration: {{duration}}",
+    "intervalError": {
+      "required": "Enter a date, start time and end time.",
+      "invalid": "Enter a valid date and time.",
+      "nonexistent": "This local time does not exist due to a clock change. Choose another time.",
+      "ambiguous": "This local time occurs twice due to a clock change. Choose an unambiguous time.",
+      "order": "End must be after start. Select next day for an overnight entry.",
+      "future": "Start and end must not be in the future."
+    },
     "noteInvoiceCue": "Customers see this note on their invoice unless your billing settings hide notes."
   },
   "inboundReviewQueue": {
