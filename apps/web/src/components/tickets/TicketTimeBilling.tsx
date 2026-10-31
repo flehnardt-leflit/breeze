@@ -137,6 +137,15 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
   useEffect(() => { setPendingDelete(null); }, [ticketId]);
   const [summary, setSummary] = useState<BillingSummary | null>(null);
   const [entries, setEntries] = useState<EntryRow[]>([]);
+  const [entriesTicket, setEntriesTicket] = useState(ticketId);
+  const [entryPage, setEntryPage] = useState({ ticketId, offset: 0 });
+  const [entryTotal, setEntryTotal] = useState(0);
+  const [entryLoading, setEntryLoading] = useState(false);
+  const [entryError, setEntryError] = useState(false);
+  const entryOffset = entryPage.ticketId === ticketId ? entryPage.offset : 0;
+  const latestEntryOffset = useRef(entryOffset);
+  latestEntryOffset.current = entryOffset;
+  const refreshSequence = useRef(0);
   const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [minutes, setMinutes] = useState('');
   const [entryMode, setEntryMode] = useState<'quick' | 'detailed'>('quick');
@@ -171,11 +180,14 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
 
   const refresh = useCallback(async () => {
     const requested = ticketId;
+    const requestedOffset = entryOffset;
+    const sequence = ++refreshSequence.current;
+    setEntryLoading(true);
     const [sumRes, listRes] = await Promise.all([
       fetchWithAuth(`/tickets/${ticketId}/billing-summary`)
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
-      fetchWithAuth(`/tickets/${ticketId}/time-entries?limit=5`)
+      fetchWithAuth(`/tickets/${ticketId}/time-entries?limit=5&offset=${requestedOffset}`)
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
     ]);
@@ -183,10 +195,22 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
     // a response for the PREVIOUSLY selected ticket can land after the switch.
     // Applying it would prefill the rate box with another org's number under
     // another org's currency (#5321 review) — drop it instead.
-    if (requested !== latestTicketId.current) return;
+    if (requested !== latestTicketId.current || requestedOffset !== latestEntryOffset.current || sequence !== refreshSequence.current) return;
     if (sumRes?.data) setSummary(sumRes.data as BillingSummary);
-    if (listRes?.data) setEntries(listRes.data as EntryRow[]);
-  }, [ticketId]);
+    setEntryLoading(false);
+    setEntryError(!listRes || !Array.isArray(listRes.data));
+    if (listRes && Array.isArray(listRes.data)) {
+      const total = Number(listRes.total) || 0;
+      setEntryTotal(total);
+      if (requestedOffset > 0 && requestedOffset >= total) {
+        setEntries([]);
+        setEntryPage({ ticketId: requested, offset: total ? Math.floor((total - 1) / 5) * 5 : 0 });
+        return;
+      }
+      setEntries(listRes.data as EntryRow[]);
+      setEntriesTicket(requested);
+    }
+  }, [ticketId, entryOffset]);
 
   useEffect(() => {
     void refresh();
@@ -197,6 +221,11 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
 
   useEffect(() => {
     setApprovalBlocked(false);
+    setEntries([]);
+    setEntriesTicket(ticketId);
+    setEntryPage({ ticketId, offset: 0 });
+    setEntryTotal(0);
+    setEntryError(false);
     setQuickAddOpen(false);
     setWorkTypeId(undefined);
     setTimerWorkTypeId(undefined);
@@ -565,7 +594,7 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
         </div>
       )}
 
-      {entries.length > 0 && (
+      {entriesTicket === ticketId && !entryError && entries.length > 0 && (
         <ul className="mt-2 space-y-1" data-testid="ticket-billing-entries">
           {entries.map((entry) => (
             <li key={entry.id} className="flex items-start justify-between gap-1 text-xs">
@@ -626,6 +655,32 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
             </li>
           ))}
         </ul>
+      )}
+
+      {entriesTicket === ticketId && entryError && (
+        <div className="mt-2 text-xs text-destructive" role="alert" data-testid="ticket-billing-page-error">
+          {t('common:states.error')}{' '}
+          <button type="button" className="underline" onClick={() => void refresh()} data-testid="ticket-billing-page-retry">
+            {t('common:actions.retry')}
+          </button>
+        </div>
+      )}
+      {entriesTicket === ticketId && entryTotal > 5 && (
+        <nav className="mt-2 flex items-center justify-between gap-2 text-xs" aria-label={t('ticketTimeBilling.title')}>
+          <button
+            type="button" className="rounded border px-2 py-1 disabled:opacity-50"
+            disabled={entryOffset === 0 || entryLoading}
+            onClick={() => { setEntries([]); setEntryPage({ ticketId, offset: Math.max(0, entryOffset - 5) }); }}
+            data-testid="ticket-billing-prev-page"
+          >{t('common:actions.previousPage')}</button>
+          <span aria-live="polite">{Math.floor(entryOffset / 5) + 1} / {Math.ceil(entryTotal / 5)}</span>
+          <button
+            type="button" className="rounded border px-2 py-1 disabled:opacity-50"
+            disabled={entryOffset + 5 >= entryTotal || entryLoading}
+            onClick={() => { setEntries([]); setEntryPage({ ticketId, offset: entryOffset + 5 }); }}
+            data-testid="ticket-billing-next-page"
+          >{t('common:actions.nextPage')}</button>
+        </nav>
       )}
 
       {/* #10073: a confirm left open when the ticket turns read-only (merged

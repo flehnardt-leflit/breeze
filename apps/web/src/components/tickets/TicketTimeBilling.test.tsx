@@ -33,6 +33,107 @@ const route = (url: string) => {
 beforeEach(() => { resetWorkTypeCache(); fetchWithAuth.mockReset(); fetchWithAuth.mockImplementation(async (url: string) => route(url)); });
 
 describe('TicketTimeBilling', () => {
+  it('finds a newly logged historical entry beyond the five most recent entries', async () => {
+    const newer = Array.from({ length: 6 }, (_, i) => ({ ...entries[0], id: `new-${i}`, description: `newer ${i}` }));
+    let rows = [...newer];
+    fetchWithAuth.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/time-entries' && init?.method === 'POST') {
+        rows = [...newer, { ...entries[0], id: 'old', description: 'old historical work' }];
+        return { ok: true, status: 201, json: async () => ({ data: {} }) } as Response;
+      }
+      if (url.startsWith('/tickets/tk-1/time-entries')) {
+        const query = new URL(url, 'http://localhost').searchParams;
+        const offset = Number(query.get('offset') ?? 0);
+        return { ok: true, status: 200, json: async () => ({ data: rows.slice(offset, offset + 5), total: rows.length }) } as Response;
+      }
+      return route(url);
+    });
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    expect(await screen.findByText('newer 0', { exact: false })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-toggle'));
+    fireEvent.click(screen.getByTestId('ticket-billing-detailed-mode'));
+    fireEvent.change(screen.getByTestId('ticket-billing-work-date'), { target: { value: '2025-06-12' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-start-time'), { target: { value: '09:00' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-end-time'), { target: { value: '10:00' } });
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+    await waitFor(() => expect(fetchWithAuth.mock.calls.some(([url, init]) => url === '/time-entries' && (init as RequestInit)?.method === 'POST')).toBe(true));
+    await waitFor(() => expect(screen.getByTestId('ticket-billing-next-page')).toBeEnabled());
+    fireEvent.click(screen.getByTestId('ticket-billing-next-page'));
+    expect(await screen.findByText('old historical work', { exact: false })).toBeInTheDocument();
+    expect(screen.getByTestId('ticket-billing-prev-page')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('ticket-billing-prev-page'));
+    expect(await screen.findByText('newer 0', { exact: false })).toBeInTheDocument();
+  });
+
+  it('offers a retry when a page request fails and retains navigation', async () => {
+    let fail = true;
+    fetchWithAuth.mockImplementation(async (url: string) => {
+      if (url.includes('offset=5') && fail) return { ok: false, status: 500 } as Response;
+      if (url.startsWith('/tickets/tk-1/time-entries')) {
+        return { ok: true, status: 200, json: async () => ({ data: entries, total: 6 }) } as Response;
+      }
+      return route(url);
+    });
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-next-page'));
+    expect(await screen.findByTestId('ticket-billing-page-error')).toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByTestId('ticket-billing-page-retry'));
+    expect(await screen.findByTestId('ticket-billing-entry-range-te-1')).toBeInTheDocument();
+  });
+
+  it('returns to the last valid page when the final entry on a page is deleted', async () => {
+    let rows = Array.from({ length: 6 }, (_, i) => ({ ...entries[0], id: `item-${i}`, description: `entry ${i}` }));
+    fetchWithAuth.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/time-entries/item-5' && init?.method === 'DELETE') {
+        rows = rows.slice(0, 5);
+        return { ok: true, status: 200, json: async () => ({}) } as Response;
+      }
+      if (url.startsWith('/tickets/tk-1/time-entries')) {
+        const offset = Number(new URL(url, 'http://localhost').searchParams.get('offset') ?? 0);
+        return { ok: true, status: 200, json: async () => ({ data: rows.slice(offset, offset + 5), total: rows.length }) } as Response;
+      }
+      return route(url);
+    });
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-next-page'));
+    fireEvent.click(await screen.findByTestId('ticket-billing-delete-item-5'));
+    fireEvent.click(await screen.findByTestId('ticket-billing-delete-confirm'));
+    expect(await screen.findByText('entry 0', { exact: false })).toBeInTheDocument();
+    expect(screen.queryByTestId('ticket-billing-next-page')).toBeNull();
+  });
+
+  it('resets pagination on ticket switch and ignores a late response for the previous ticket', async () => {
+    let releaseOld: ((r: Response) => void) | undefined;
+    fetchWithAuth.mockImplementation(async (url: string) => {
+      if (url.startsWith('/tickets/tk-1/time-entries') && url.includes('offset=5')) {
+        return new Promise<Response>((resolve) => { releaseOld = resolve; });
+      }
+      if (url.startsWith('/tickets/tk-1/time-entries')) {
+        return { ok: true, status: 200, json: async () => ({ data: entries, total: 6 }) } as Response;
+      }
+      if (url.startsWith('/tickets/tk-2/time-entries')) {
+        return { ok: true, status: 200, json: async () => ({ data: [{ ...entries[0], id: 'other', description: 'other ticket' }], total: 1 }) } as Response;
+      }
+      if (url.startsWith('/tickets/tk-2/billing-summary')) {
+        return { ok: true, status: 200, json: async () => ({ data: summary }) } as Response;
+      }
+      return route(url);
+    });
+    const { rerender } = render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-next-page'));
+    await waitFor(() => expect(releaseOld).toBeDefined());
+    rerender(<TicketTimeBilling ticketId="tk-2" />);
+    expect(await screen.findByText('other ticket', { exact: false })).toBeInTheDocument();
+    expect(fetchWithAuth.mock.calls.some(([url]) => String(url).startsWith('/tickets/tk-2/time-entries?limit=5&offset=0'))).toBe(true);
+    await act(async () => {
+      releaseOld?.({ ok: true, status: 200, json: async () => ({ data: [{ ...entries[0], description: 'stale old ticket' }], total: 6 }) } as Response);
+      await Promise.resolve();
+    });
+    expect(screen.queryByText('stale old ticket', { exact: false })).toBeNull();
+    expect(screen.getByText('other ticket', { exact: false })).toBeInTheDocument();
+  });
+
   it('renders totals from the billing summary', async () => {
     render(<TicketTimeBilling ticketId="tk-1" />);
     expect((await screen.findByTestId('ticket-billing-time-total')).textContent).toContain('1h 30m');

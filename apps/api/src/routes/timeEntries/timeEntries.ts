@@ -207,7 +207,9 @@ timeEntriesApiRoutes.get('/timesheet', scopes, readPerm, zValidator('query', tim
   if (targetUserId !== actor.userId && !actor.manageAll) {
     return c.json({ error: 'Viewing other timesheets requires an admin role' }, 403);
   }
-  const timesheet = await getTimesheet(targetUserId, q.weekStart, actor.accessibleOrgIds);
+  const timesheet = q.timezone === undefined
+    ? await getTimesheet(targetUserId, q.weekStart, actor.accessibleOrgIds)
+    : await getTimesheet(targetUserId, q.weekStart, actor.accessibleOrgIds, q.timezone);
   return c.json({ data: timesheet });
 });
 

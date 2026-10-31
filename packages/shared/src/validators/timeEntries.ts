@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isValidIanaTimezone } from '../utils/timezone';
 import { optionalQueryBoolean } from './queryParams';
 
 // 'awaiting_approval' (#4617): held from billing until the customer approves.
@@ -138,10 +139,28 @@ export const bulkApproveSchema = z.object({
   path: ['ids']
 });
 
-export const timesheetQuerySchema = z.object({
-  userId: z.string().guid().optional(),
-  weekStart: z.coerce.date()
-});
+const timesheetUser = z.string().guid().optional();
+// Opt-in requests name a local calendar day, not an instant. Keep the original
+// coercion unchanged for older clients that do not pass a time zone.
+const localWeekStart = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+  const date = new Date(value + 'T00:00:00.000Z');
+  // The calendar resolver examines up to two days beyond the end of the
+  // seven-day week; keep that entire window in four-digit ISO years.
+  return value >= '0100-01-01' && value <= '9999-12-22' && Number.isFinite(date.getTime()) &&
+    date.toISOString().slice(0, 10) === value;
+}, 'Invalid calendar date').transform((value) => new Date(value + 'T00:00:00.000Z'));
+
+export const timesheetQuerySchema = z.union([
+  z.object({ userId: timesheetUser, weekStart: z.coerce.date(), timezone: z.undefined().optional() }),
+  z.object({
+    userId: timesheetUser,
+    weekStart: localWeekStart,
+    timezone: z.string().min(1).max(64).refine(
+      (value) => !/^[+-]/.test(value) && isValidIanaTimezone(value),
+      'Invalid IANA time zone'
+    ),
+  }),
+]);
 
 // No currency field by design — see the note above createTimeEntrySchema.
 export const ticketPartSchema = z.object({
