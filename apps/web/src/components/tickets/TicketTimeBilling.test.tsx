@@ -16,6 +16,7 @@ vi.mock('../shared/Toast', () => ({ showToast: (...a: unknown[]) => showToast(..
 import TicketTimeBilling from './TicketTimeBilling';
 import { resetWorkTypeCache } from '../shared/WorkTypeSelect';
 import { BILLING_CHANGED_EVENT, TIMER_CHANGED_EVENT } from '../../lib/timerActions';
+import { formatDateTime } from '../../lib/dateTimeFormat';
 
 const summary = {
   time: { totalMinutes: 90, billableMinutes: 60, billableAmounts: [{ currencyCode: 'EUR', amount: '150.00' }] },
@@ -45,6 +46,13 @@ describe('TicketTimeBilling', () => {
     expect(parts.textContent).not.toContain('61.98');
     expect(screen.getByTestId('ticket-billing-parts-total-EUR').textContent).toBe('€49.98');
     expect(screen.getByTestId('ticket-billing-parts-total-USD').textContent).toBe('$12.00');
+  });
+
+  it('shows the local start and end of an entry in the ticket', async () => {
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    const range = await screen.findByTestId('ticket-billing-entry-range-te-1');
+    expect(range).toHaveTextContent(formatDateTime(entries[0]!.startedAt, { dateStyle: 'short', timeStyle: 'short' }));
+    expect(range).toHaveTextContent(formatDateTime(entries[0]!.endedAt, { dateStyle: 'short', timeStyle: 'short' }));
   });
 
   // W06 (#3900): the SAME badge the timesheet renders, from the same helper, so
@@ -173,6 +181,86 @@ describe('TicketTimeBilling', () => {
       expect(body.description).toBe('patched');
       expect(new Date(body.endedAt).getTime() - new Date(body.startedAt).getTime()).toBe(30 * 60_000);
     });
+  });
+
+  it('posts a historical interval with the existing billing defaults and refreshes listeners', async () => {
+    const billing = vi.fn();
+    window.addEventListener(BILLING_CHANGED_EVENT, billing);
+    try {
+      render(<TicketTimeBilling ticketId="tk-1" />);
+      fireEvent.click(await screen.findByTestId('ticket-billing-quick-add-toggle'));
+      fireEvent.click(screen.getByTestId('ticket-billing-detailed-mode'));
+      fireEvent.change(screen.getByTestId('ticket-billing-work-date'), { target: { value: '2025-06-12' } });
+      fireEvent.change(screen.getByTestId('ticket-billing-start-time'), { target: { value: '09:00' } });
+      fireEvent.change(screen.getByTestId('ticket-billing-end-time'), { target: { value: '10:00' } });
+      fireEvent.change(screen.getByTestId('ticket-billing-quick-add-description'), { target: { value: 'historical work' } });
+      expect(screen.getByTestId('ticket-billing-duration')).toHaveTextContent('1h');
+      fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+      await waitFor(() => expect(fetchWithAuth.mock.calls.some(([url]) => url === '/time-entries')).toBe(true));
+      const call = fetchWithAuth.mock.calls.find(([url]) => url === '/time-entries')!;
+      const body = JSON.parse((call[1] as RequestInit).body as string);
+      expect(body).toMatchObject({ ticketId: 'tk-1', description: 'historical work' });
+      expect(body).not.toHaveProperty('workTypeId');
+      expect(body).not.toHaveProperty('isBillable');
+      expect(body).not.toHaveProperty('hourlyRate');
+      expect(new Date(body.startedAt)).toEqual(new Date(2025, 5, 12, 9));
+      expect(new Date(body.endedAt)).toEqual(new Date(2025, 5, 12, 10));
+      await waitFor(() => expect(billing).toHaveBeenCalled());
+    } finally {
+      window.removeEventListener(BILLING_CHANGED_EVENT, billing);
+    }
+  });
+
+  it('rejects a reversed interval unless next-day end is selected', async () => {
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-quick-add-toggle'));
+    fireEvent.click(screen.getByTestId('ticket-billing-detailed-mode'));
+    fireEvent.change(screen.getByTestId('ticket-billing-work-date'), { target: { value: '2025-06-12' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-start-time'), { target: { value: '23:00' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-end-time'), { target: { value: '01:00' } });
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+    expect(screen.getByTestId('ticket-billing-detailed-error')).toHaveTextContent(/after/i);
+    expect(fetchWithAuth.mock.calls.some(([url]) => url === '/time-entries')).toBe(false);
+    fireEvent.click(screen.getByTestId('ticket-billing-next-day'));
+    expect(screen.getByTestId('ticket-billing-duration')).toHaveTextContent('2h');
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+    await waitFor(() => expect(fetchWithAuth.mock.calls.some(([url]) => url === '/time-entries')).toBe(true));
+  });
+
+  it('keeps the detailed inputs when the server refuses the entry', async () => {
+    showToast.mockClear();
+    fetchWithAuth.mockImplementation(async (url: string) => url === '/time-entries'
+      ? { ok: false, status: 403, json: async () => ({ error: 'Forbidden' }) } as Response
+      : route(url));
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-quick-add-toggle'));
+    fireEvent.click(screen.getByTestId('ticket-billing-detailed-mode'));
+    fireEvent.change(screen.getByTestId('ticket-billing-work-date'), { target: { value: '2025-06-12' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-start-time'), { target: { value: '09:00' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-end-time'), { target: { value: '10:00' } });
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+    await waitFor(() => expect(showToast).toHaveBeenCalled());
+    expect(screen.getByTestId('ticket-billing-work-date')).toHaveValue('2025-06-12');
+    expect(screen.getByTestId('ticket-billing-start-time')).toHaveValue('09:00');
+    expect(screen.getByTestId('ticket-billing-end-time')).toHaveValue('10:00');
+  });
+
+  it('uses the existing permission-gated billing override path in detailed mode', async () => {
+    canManageBilling = false;
+    render(<TicketTimeBilling ticketId="tk-1" />);
+    fireEvent.click(await screen.findByTestId('ticket-billing-quick-add-toggle'));
+    fireEvent.click(screen.getByTestId('ticket-billing-detailed-mode'));
+    fireEvent.change(screen.getByTestId('ticket-billing-work-date'), { target: { value: '2025-06-12' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-start-time'), { target: { value: '09:00' } });
+    fireEvent.change(screen.getByTestId('ticket-billing-end-time'), { target: { value: '10:00' } });
+    expect(screen.getByTestId('ticket-billing-quick-add-billable')).toBeDisabled();
+    expect(screen.getByTestId('ticket-billing-quick-add-rate')).toHaveAttribute('readonly');
+    fireEvent.click(screen.getByTestId('ticket-billing-quick-add-submit'));
+    await waitFor(() => expect(fetchWithAuth.mock.calls.some(([url]) => url === '/time-entries')).toBe(true));
+    const call = fetchWithAuth.mock.calls.find(([url]) => url === '/time-entries')!;
+    const body = JSON.parse((call[1] as RequestInit).body as string);
+    expect(body).not.toHaveProperty('isBillable');
+    expect(body).not.toHaveProperty('hourlyRate');
   });
 
   // #5321: the quick-add offered no rate, so an entry landed with hourly_rate

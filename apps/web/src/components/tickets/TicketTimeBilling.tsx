@@ -17,6 +17,13 @@ import { ApproximateMoneyLine } from '../billing/shared/ApproximateMoneyLine';
 import { Trash2 } from 'lucide-react';
 import { billedLaborMinutes, laborHours } from '@breeze/shared';
 import { laborBreakdown } from '../time/laborBreakdown';
+import { parseManualTimeEntry } from '../../lib/manualTimeEntry';
+import { formatDateTime } from '../../lib/dateTimeFormat';
+
+function localToday(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
 
 /** Mirrors the API's `CurrencyAmount` — money is reported per currency, never summed across. */
 interface CurrencyAmount {
@@ -49,6 +56,7 @@ interface EntryRow {
   description: string | null;
   isBillable: boolean;
   userName: string | null;
+  startedAt?: string | null;
   endedAt: string | null;
   /** W06 (#3900) server-stamped provenance; absent on an older API. */
   source?: string | null;
@@ -131,6 +139,12 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
   const [entries, setEntries] = useState<EntryRow[]>([]);
   const [quickAddOpen, setQuickAddOpen] = useState(false);
   const [minutes, setMinutes] = useState('');
+  const [entryMode, setEntryMode] = useState<'quick' | 'detailed'>('quick');
+  const [workDate, setWorkDate] = useState(localToday);
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
+  const [nextDay, setNextDay] = useState(false);
+  const [showIntervalError, setShowIntervalError] = useState(false);
   const [description, setDescription] = useState('');
   const [billableOverride, setBillableOverride] = useState<boolean | undefined>(undefined);
   // #5321: the rate box shows the ticket's resolved default until the tech
@@ -187,6 +201,12 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
     setWorkTypeId(undefined);
     setTimerWorkTypeId(undefined);
     setMinutes('');
+    setEntryMode('quick');
+    setWorkDate(localToday());
+    setStartTime('');
+    setEndTime('');
+    setNextDay(false);
+    setShowIntervalError(false);
     setDescription('');
     setBillableOverride(undefined);
     setRate('');
@@ -210,6 +230,7 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
   // (ALL_MISSING_RATE 409). Say it here, not three screens later. A bad rate is
   // a different complaint — never show both.
   const missingRate = !workTypeChanged && billable && typedRate === '' && summary?.defaults?.coverage !== 'included';
+  const interval = parseManualTimeEntry(workDate, startTime, endTime, nextDay);
 
   const startTimer = (opts: { nonBillable?: boolean } = {}) => {
     // Guard against double-fire: a start request takes a beat server-side, and
@@ -260,7 +281,14 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
 
   const submitQuickAdd = async () => {
     const mins = Math.round(Number(minutes));
-    if (!Number.isFinite(mins) || mins <= 0) return;
+    if (entryMode === 'quick' && (!Number.isFinite(mins) || mins <= 0)) return;
+    // Revalidate at submit time: an interval could have become invalid since
+    // the last render, and no server-side validation is bypassed by this UI.
+    const detailed = entryMode === 'detailed' ? parseManualTimeEntry(workDate, startTime, endTime, nextDay) : null;
+    if (detailed && !detailed.ok) {
+      setShowIntervalError(true);
+      return;
+    }
     // Blank stays blank: omit hourlyRate so the server's org/category default
     // still applies (unchanged behavior). A typed rate is sent at the minor-unit
     // precision the API validator accepts (multipleOf 0.01). An invalid one is
@@ -277,8 +305,8 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
             method: 'POST',
             body: JSON.stringify({
               ticketId,
-              startedAt: start.toISOString(),
-              endedAt: end.toISOString(),
+              startedAt: detailed?.ok ? detailed.startedAt : start.toISOString(),
+              endedAt: detailed?.ok ? detailed.endedAt : end.toISOString(),
               description: description || undefined,
               ...(canManageBilling && billableOverride !== undefined ? { isBillable: billable } : {}),
               // Untouched (undefined) omits the field so the server-side
@@ -293,6 +321,11 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
       setQuickAddOpen(false);
       setWorkTypeId(undefined);
       setMinutes('');
+      setWorkDate(localToday());
+      setStartTime('');
+      setEndTime('');
+      setNextDay(false);
+      setShowIntervalError(false);
       setDescription('');
       setRate('');
       setRateDirty(false);
@@ -412,6 +445,18 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
 
       {quickAddOpen && !readOnly && (
         <div className="mt-2 space-y-1.5 rounded-md border bg-muted/30 p-2" data-testid="ticket-billing-quick-add">
+          <fieldset className="flex flex-wrap gap-3 text-xs">
+            <legend className="sr-only">{t('ticketTimeBilling.entryMode')}</legend>
+            <label className="flex items-center gap-1">
+              <input type="radio" name={`time-entry-mode-${ticketId}`} checked={entryMode === 'quick'} onChange={() => setEntryMode('quick')} />
+              {t('ticketTimeBilling.quickMode')}
+            </label>
+            <label className="flex items-center gap-1">
+              <input type="radio" name={`time-entry-mode-${ticketId}`} checked={entryMode === 'detailed'} onChange={() => setEntryMode('detailed')} data-testid="ticket-billing-detailed-mode" />
+              {t('ticketTimeBilling.detailedMode')}
+            </label>
+          </fieldset>
+          {entryMode === 'quick' ? (
           <input
             type="number"
             min={1}
@@ -423,6 +468,31 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
             className="w-full rounded-md border bg-background px-2 py-1 text-xs"
             data-testid="ticket-billing-quick-add-minutes"
           />
+          ) : (
+            <div className="space-y-1.5">
+              <label className="block text-xs">
+                {t('ticketTimeBilling.workDate')}
+                <input type="date" value={workDate} onChange={(e) => setWorkDate(e.target.value)} className="block w-full min-w-0 rounded-md border bg-background px-2 py-1 text-xs" data-testid="ticket-billing-work-date" />
+              </label>
+              <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                <label className="block min-w-0 text-xs">
+                  {t('ticketTimeBilling.startTime')}
+                  <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} className="block w-full min-w-0 rounded-md border bg-background px-2 py-1 text-xs" data-testid="ticket-billing-start-time" />
+                </label>
+                <label className="block min-w-0 text-xs">
+                  {t('ticketTimeBilling.endTime')}
+                  <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} className="block w-full min-w-0 rounded-md border bg-background px-2 py-1 text-xs" data-testid="ticket-billing-end-time" />
+                </label>
+              </div>
+              <label className="flex items-center gap-1.5 text-xs">
+                <input type="checkbox" checked={nextDay} onChange={(e) => setNextDay(e.target.checked)} data-testid="ticket-billing-next-day" />
+                {t('ticketTimeBilling.nextDay')}
+              </label>
+              <p className="text-[11px] text-muted-foreground">{t('ticketTimeBilling.localTimeZone', { zone: Intl.DateTimeFormat().resolvedOptions().timeZone })}</p>
+              {interval.ok && <p className="text-xs" data-testid="ticket-billing-duration">{t('ticketTimeBilling.duration', { duration: formatMinutes(interval.durationMinutes) })}</p>}
+              {showIntervalError && !interval.ok && <p role="alert" className="text-xs text-destructive" data-testid="ticket-billing-detailed-error">{t(/* i18n-dynamic */ `ticketTimeBilling.intervalError.${interval.error}`)}</p>}
+            </div>
+          )}
           <input
             type="text"
             value={description}
@@ -502,6 +572,12 @@ export default function TicketTimeBilling({ ticketId, readOnly = false }: {
               <span className="min-w-0 truncate text-muted-foreground">
                 {entry.userName ?? t('ticketTimeBilling.techFallback')}
                 {entry.description ? ` — ${entry.description}` : ''}
+                {entry.startedAt && (
+                  <span className="block whitespace-normal text-[10px]" data-testid={`ticket-billing-entry-range-${entry.id}`}>
+                    {formatDateTime(entry.startedAt, { dateStyle: 'short', timeStyle: 'short' })}
+                    {entry.endedAt && ` – ${formatDateTime(entry.endedAt, { dateStyle: 'short', timeStyle: 'short' })}`}
+                  </span>
+                )}
                 {isAwaitingApproval(entry) && <AwaitingApprovalChip entryId={entry.id} className="ml-1" />}
                 {sourceBadgeLabelKey(entry.source) && (
                   <span

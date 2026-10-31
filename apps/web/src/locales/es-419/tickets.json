@@ -254,6 +254,23 @@
       "notFound": "Esta entrada ya no existe."
     },
     "deleteEntryWithDescription": "Eliminar la entrada de tiempo de {{duration}} de {{tech}}: {{description}}",
+    "entryMode": "Modo de registro",
+    "quickMode": "Minutos rápidos",
+    "detailedMode": "Registro detallado",
+    "workDate": "Fecha de trabajo",
+    "startTime": "Hora de inicio",
+    "endTime": "Hora de fin",
+    "nextDay": "El fin es al día siguiente",
+    "localTimeZone": "Zona horaria local: {{zone}}",
+    "duration": "Duración: {{duration}}",
+    "intervalError": {
+      "required": "Introduce la fecha, el inicio y el fin.",
+      "invalid": "Introduce una fecha y hora válidas.",
+      "nonexistent": "Esta hora local no existe por el cambio de hora. Elige otra.",
+      "ambiguous": "Esta hora local se repite por el cambio de hora. Elige una hora inequívoca.",
+      "order": "El fin debe ser posterior al inicio. Selecciona el día siguiente para trabajo nocturno.",
+      "future": "El inicio y el fin no pueden estar en el futuro."
+    },
     "noteInvoiceCue": "Los clientes ven esta nota en su factura, a menos que tu configuración de facturación oculte las notas."
   },
   "inboundReviewQueue": {

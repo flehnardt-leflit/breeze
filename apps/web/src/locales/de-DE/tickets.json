@@ -254,6 +254,23 @@
       "notFound": "Dieser Eintrag existiert nicht mehr."
     },
     "deleteEntryWithDescription": "Zeiteintrag über {{duration}} von {{tech}} löschen: {{description}}",
+    "entryMode": "Erfassungsart",
+    "quickMode": "Minuten schnell erfassen",
+    "detailedMode": "Detaillierte Erfassung",
+    "workDate": "Leistungsdatum",
+    "startTime": "Arbeitsbeginn",
+    "endTime": "Arbeitsende",
+    "nextDay": "Ende am Folgetag",
+    "localTimeZone": "Lokale Zeitzone: {{zone}}",
+    "duration": "Dauer: {{duration}}",
+    "intervalError": {
+      "required": "Bitte Datum, Beginn und Ende eingeben.",
+      "invalid": "Bitte ein gültiges Datum und eine gültige Uhrzeit eingeben.",
+      "nonexistent": "Diese Ortszeit existiert wegen der Zeitumstellung nicht. Bitte eine andere Uhrzeit wählen.",
+      "ambiguous": "Diese Ortszeit kommt wegen der Zeitumstellung zweimal vor. Bitte eine eindeutige Uhrzeit wählen.",
+      "order": "Das Ende muss nach dem Beginn liegen. Für Nachtarbeit den Folgetag wählen.",
+      "future": "Beginn und Ende dürfen nicht in der Zukunft liegen."
+    },
     "noteInvoiceCue": "Kunden sehen diese Notiz auf ihrer Rechnung, sofern Ihre Abrechnungseinstellungen Notizen nicht ausblenden."
   },
   "inboundReviewQueue": {
