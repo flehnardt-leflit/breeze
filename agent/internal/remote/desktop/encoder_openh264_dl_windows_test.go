@@ -3,8 +3,11 @@
 package desktop
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,8 +42,8 @@ func swapDownloadFn(t *testing.T, fn func(string) error) {
 
 func TestRefuseUntrustedDataDir(t *testing.T) {
 	swapVerifyProgramDataPathFn(t, func(string) error { return errors.New("owned by a standard user") })
-	if err := refuseUntrustedDataDir(`C:\ProgramData\Breeze\data`); err == nil {
-		t.Fatal("expected a refusal when the data directory does not verify")
+	if err := refuseUntrustedDataDir(`C:\ProgramData\Breeze\data`); err == nil || !strings.Contains(err.Error(), "owned by a standard user") || !strings.Contains(err.Error(), "trust policy") {
+		t.Fatalf("expected the verifier’s diagnostic and trust policy, got %v", err)
 	}
 }
 
@@ -134,5 +137,97 @@ func TestFindOpenH264Library_VerifiesDownloadedFile(t *testing.T) {
 	}
 	if checks < 2 {
 		t.Errorf("expected the codec file to be verified before and after the download, got %d checks", checks)
+	}
+}
+
+// TestStageOpenH264DLL verifies the bytes staged for installation, rather
+// than trusting the bytes reported by the download stream. No network is used.
+func TestStageOpenH264DLL(t *testing.T) {
+	const payload = "small test codec payload"
+	sum := sha256.Sum256([]byte(payload))
+	goodHash := hex.EncodeToString(sum[:])
+	tests := []struct {
+		name	string
+		input	io.Reader
+		hash	string
+		wantErr bool
+	}{
+		{name: "verified bytes", input: strings.NewReader(payload), hash: goodHash},
+		{name: "invalid hash", input: strings.NewReader(payload), hash: strings.Repeat("0", 64), wantErr: true},
+		{name: "empty input", input: strings.NewReader(""), hash: goodHash, wantErr: true},
+		{name: "oversized input", input: io.LimitReader(zeroReader{}, maxOpenH264DLLBytes+1), hash: goodHash, wantErr: true},
+		{name: "read failure", input: failingOpenH264Reader{}, hash: goodHash, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			err := stageOpenH264DLL(dir, tc.input, tc.hash)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("stageOpenH264DLL() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantErr {
+				if len(entries) != 0 {
+					t.Fatalf("failed staging left files: %v", entries)
+				}
+				return
+			}
+			if len(entries) != 1 || entries[0].Name() != openH264DLLName {
+				t.Fatalf("unexpected staged files: %v", entries)
+			}
+			got, err := os.ReadFile(filepath.Join(dir, openH264DLLName))
+			if err != nil || string(got) != payload {
+				t.Fatalf("staged bytes %q, error %v", got, err)
+			}
+		})
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+type failingOpenH264Reader struct{}
+
+func (failingOpenH264Reader) Read(p []byte) (int, error) {
+	return copy(p, "partial"), errors.New("injected read failure")
+}
+
+func TestFindOpenH264Library_RejectsDownloadedHashMismatch(t *testing.T) {
+	dataDir := t.TempDir()
+	swapGetDataDirFn(t, dataDir)
+	swapVerifyProgramDataPathFn(t, func(string) error { return nil })
+	swapDownloadFn(t, func(dir string) error {
+		return os.WriteFile(filepath.Join(dir, openH264DLLName), []byte("tampered"), 0o600)
+	})
+	_, err := findOpenH264Library()
+	if err == nil || !strings.Contains(err.Error(), "SHA-256") {
+		t.Fatalf("downloaded bytes with an incorrect hash must not be returned: %v", err)
+	}
+}
+
+// A failed download must not truncate an existing DLL or the predictable
+// temporary filename used by older versions of the downloader.
+func TestStageOpenH264DLL_FailurePreservesExistingFiles(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{openH264DLLName, openH264DLLName + ".tmp"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := stageOpenH264DLL(dir, strings.NewReader("untrusted"), strings.Repeat("0", 64)); err == nil {
+		t.Fatal("expected mismatch")
+	}
+	for _, name := range []string{openH264DLLName, openH264DLLName + ".tmp"} {
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || string(got) != "keep" {
+			t.Fatalf("existing file %s changed: %q, %v", name, got, err)
+		}
 	}
 }

@@ -50,7 +50,7 @@ var (
 // is neither read from nor written into.
 func refuseUntrustedDataDir(dataDir string) error {
 	if err := verifyProgramDataPathFn(dataDir); err != nil {
-		return fmt.Errorf("agent data directory %q is not verified as SYSTEM/Administrators-only — refusing to load or stage the OpenH264 codec from it: %w", dataDir, err)
+		return fmt.Errorf("agent data directory %q did not pass this process’s trust policy — refusing to load or stage the OpenH264 codec from it: %w", dataDir, err)
 	}
 	return nil
 }
@@ -88,7 +88,7 @@ func findOpenH264Library() (string, error) {
 	// has verified its ownership and permissions itself.
 	dataDir := getDataDirFn()
 	if derr := refuseUntrustedDataDir(dataDir); derr != nil {
-		slog.Warn("OpenH264: skipping the agent data directory — it did not verify as SYSTEM/Administrators-only",
+		slog.Warn("OpenH264: skipping the agent data directory — it did not pass this process’s trust policy",
 			"dataDir", dataDir, "error", derr.Error(),
 		)
 		return "", fmt.Errorf("OpenH264 DLL not found next to the executable, and the agent data directory is not trusted: %w", derr)
@@ -104,7 +104,7 @@ func findOpenH264Library() (string, error) {
 			)
 		}
 	} else if !errors.Is(ferr, os.ErrNotExist) {
-		slog.Warn("OpenH264 DLL in agent data dir did not verify as SYSTEM/Administrators-only, ignoring",
+		slog.Warn("OpenH264 DLL in agent data dir did not pass this process’s trust policy, ignoring",
 			"path", candidate, "error", ferr.Error(),
 		)
 	}
@@ -117,7 +117,12 @@ func findOpenH264Library() (string, error) {
 		return "", fmt.Errorf("auto-download OpenH264: %w", err)
 	}
 	if ferr := verifyProgramDataPathFn(candidate); ferr != nil {
-		return "", fmt.Errorf("downloaded OpenH264 DLL did not verify as SYSTEM/Administrators-only: %w", ferr)
+		return "", fmt.Errorf("downloaded OpenH264 DLL did not pass this process’s trust policy: %w", ferr)
+	}
+	if ok, err := verifyFileSHA256(candidate, openH264SHA256); err != nil {
+		return "", fmt.Errorf("verify downloaded OpenH264 DLL hash: %w", err)
+	} else if !ok {
+		return "", fmt.Errorf("downloaded OpenH264 DLL failed SHA-256 verification")
 	}
 	return candidate, nil
 }
@@ -140,6 +145,13 @@ func downloadOpenH264DLL(destDir string) error {
 	return lastErr
 }
 
+// maxOpenH264DLLBytes caps decompression before the untrusted response can
+// consume an unbounded amount of disk. The pinned 2.4.1 DLL is well below it.
+const (
+	maxOpenH264DLLBytes		int64 = 16 << 20
+	maxOpenH264CompressedBytes	int64 = 8 << 20
+)
+
 func downloadAndVerify(url, destDir string) error {
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Get(url)
@@ -147,45 +159,52 @@ func downloadAndVerify(url, destDir string) error {
 		return fmt.Errorf("download %s: %w", url, err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
+	return stageOpenH264DLL(destDir, bzip2.NewReader(io.LimitReader(resp.Body, maxOpenH264CompressedBytes)), openH264SHA256)
+}
 
-	// Decompress bzip2 stream and compute SHA-256 as we write
-	bzReader := bzip2.NewReader(resp.Body)
+// stageOpenH264DLL creates an unpredictable, exclusive temporary file and
+// checks the contents through that same open handle before moving it into
+// place. The caller must first verify and protect destDir. This does not by
+// itself pin the final file across the later LoadLibrary call.
+func stageOpenH264DLL(destDir string, src io.Reader, expectedHash string) error {
+	f, err := os.CreateTemp(destDir, ".openh264-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create codec temporary file: %w", err)
+	}
+	tmpPath := f.Name()
+	defer os.Remove(tmpPath)
+	written, copyErr := io.Copy(f, io.LimitReader(src, maxOpenH264DLLBytes+1))
+	if copyErr != nil {
+		_ = f.Close()
+		return fmt.Errorf("decompress: %w", copyErr)
+	}
+	if written > maxOpenH264DLLBytes {
+		_ = f.Close()
+		return fmt.Errorf("decompressed OpenH264 DLL exceeds size limit")
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("rewind temporary codec: %w", err)
+	}
 	hasher := sha256.New()
-
-	tmpPath := filepath.Join(destDir, openH264DLLName+".tmp")
-	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return fmt.Errorf("create tmp file: %w", err)
+	if _, err := io.Copy(hasher, f); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("hash temporary codec: %w", err)
 	}
-
-	written, err := io.Copy(f, io.TeeReader(bzReader, hasher))
-	f.Close()
-	if err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("decompress: %w", err)
-	}
-
-	// Verify SHA-256 before installing
 	hash := hex.EncodeToString(hasher.Sum(nil))
-	if hash != openH264SHA256 {
-		os.Remove(tmpPath)
-		return fmt.Errorf("SHA-256 mismatch: got %s, expected %s", hash, openH264SHA256)
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close temporary codec: %w", err)
 	}
-
+	if hash != expectedHash {
+		return fmt.Errorf("SHA-256 mismatch: got %s, expected %s", hash, expectedHash)
+	}
 	finalPath := filepath.Join(destDir, openH264DLLName)
 	if err := os.Rename(tmpPath, finalPath); err != nil {
-		os.Remove(tmpPath)
 		return fmt.Errorf("rename: %w", err)
 	}
-
-	slog.Info("OpenH264 DLL downloaded and verified",
-		"path", finalPath,
-		"size", written,
-		"sha256", hash,
-	)
+	slog.Info("OpenH264 DLL downloaded and verified", "path", finalPath, "size", written, "sha256", hash)
 	return nil
 }

@@ -1,0 +1,48 @@
+name: Quick Support OpenH264 Windows (isolated)
+
+on:
+  push:
+    branches:
+      - fix/quick-support-openh264
+
+permissions:
+  contents: read
+
+jobs:
+  windows-codec-tests:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.10'
+          cache: false
+      - name: Check Go formatting
+        working-directory: agent
+        shell: pwsh
+        run: |
+          $unformatted = gofmt -d internal/remote/desktop/encoder_openh264_dl_windows.go internal/remote/desktop/encoder_openh264_dl_windows_test.go
+          if ($LASTEXITCODE -ne 0 -or $unformatted) { $unformatted; throw "Go files need formatting" }
+      - name: Run focused codec regression tests
+        working-directory: agent
+        shell: pwsh
+        run: |
+          go test -count=1 -v -run '^Test(StageOpenH264DLL|RefuseUntrustedDataDir|FindOpenH264Library)' ./internal/remote/desktop 2>&1 | Tee-Object -Variable codecLog
+          if ($LASTEXITCODE -ne 0) { throw 'Codec tests failed' }
+          if (-not ($codecLog -match '^--- PASS: TestStageOpenH264DLL ')) { throw 'Codec staging test did not run' }
+          if ($codecLog -match '^--- SKIP:') { throw 'A focused codec test was skipped' }
+      - name: Run focused workspace and ProgramData regressions
+        working-directory: agent
+        shell: pwsh
+        run: |
+          go test -count=1 -v -run '^Test(UserWorkspaceStandardUserEnrollmentSaves|UserWorkspaceCallerTokenOwnsWorkspace|VerifyProgramDataPathAcceptsHardenedChainAndRefusesUserWritableFile)$' ./internal/config 2>&1 | Tee-Object -Variable configLog
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace or ProgramData tests failed' }
+          foreach ($name in @('TestUserWorkspaceStandardUserEnrollmentSaves', 'TestUserWorkspaceCallerTokenOwnsWorkspace', 'TestVerifyProgramDataPathAcceptsHardenedChainAndRefusesUserWritableFile')) {
+            if (-not ($configLog -match ("^--- PASS: " + $name + " "))) { throw "Test did not pass: $name" }
+          }
+          if ($configLog -match '^--- SKIP:') { throw 'A focused workspace test was skipped' }
