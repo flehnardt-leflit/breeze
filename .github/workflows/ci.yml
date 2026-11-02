@@ -2269,6 +2269,28 @@ jobs:
         working-directory: agent
         run: go mod download
 
+      # Temporary branch-scoped verification: this checks only the staging
+      # hardening, not the unresolved secure-loader or viewer E2E requirements.
+      - name: Verify Quick Support codec staging (isolated branch)
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/fix/quick-support-openh264'
+        working-directory: agent
+        shell: pwsh
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          $unformatted = gofmt -d internal/remote/desktop/encoder_openh264_dl_windows.go internal/remote/desktop/encoder_openh264_dl_windows_test.go
+          if ($LASTEXITCODE -ne 0 -or $unformatted) { $unformatted; throw "Go files need formatting" }
+          go test -count=1 -v -run '^Test(StageOpenH264DLL|RefuseUntrustedDataDir|FindOpenH264Library)' ./internal/remote/desktop 2>&1 | Tee-Object -Variable codecLog
+          if ($LASTEXITCODE -ne 0) { throw 'Codec tests failed' }
+          if (-not ($codecLog -match '^--- PASS: TestStageOpenH264DLL ')) { throw 'Codec staging test did not run' }
+          if ($codecLog -match '^--- SKIP:') { throw 'A focused codec test was skipped' }
+          go test -count=1 -v -run '^Test(UserWorkspaceStandardUserEnrollmentSaves|UserWorkspaceCallerTokenOwnsWorkspace|VerifyProgramDataPathAcceptsHardenedChainAndRefusesUserWritableFile)$' ./internal/config 2>&1 | Tee-Object -Variable configLog
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace or ProgramData tests failed' }
+          foreach ($name in @('TestUserWorkspaceStandardUserEnrollmentSaves', 'TestUserWorkspaceCallerTokenOwnsWorkspace', 'TestVerifyProgramDataPathAcceptsHardenedChainAndRefusesUserWritableFile')) {
+            if (-not ($configLog -match ("^--- PASS: " + $name + " "))) { throw "Test did not pass: $name" }
+          }
+          if ($configLog -match '^--- SKIP:') { throw 'A focused workspace test was skipped' }
+
       # CGO_ENABLED=0 is required, not incidental. internal/remote/desktop is a
       # non-cgo package on Windows: comVtblFn, dxgiCapturer and procDeleteObject
       # are defined in files tagged `windows && !cgo`, while audio_windows.go,

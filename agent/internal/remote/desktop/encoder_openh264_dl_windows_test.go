@@ -3,6 +3,7 @@
 package desktop
 
 import (
+	"compress/bzip2"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -157,6 +158,7 @@ func TestStageOpenH264DLL(t *testing.T) {
 		{name: "empty input", input: strings.NewReader(""), hash: goodHash, wantErr: true},
 		{name: "oversized input", input: io.LimitReader(zeroReader{}, maxOpenH264DLLBytes+1), hash: goodHash, wantErr: true},
 		{name: "read failure", input: failingOpenH264Reader{}, hash: goodHash, wantErr: true},
+		{name: "truncated bzip2", input: bzip2.NewReader(strings.NewReader("BZh9")), hash: goodHash, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
